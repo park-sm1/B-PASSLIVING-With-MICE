@@ -561,7 +561,7 @@
         </div>
       </div>
 
-      <button class="logout-btn" onclick="handleLogout()">로그아웃</button>
+      <button class="logout-btn" id="logoutBtn" onclick="handleLogout()">로그아웃</button>
     </div>
 
     <div class="nav-bar">
@@ -667,6 +667,10 @@
     let user = { loggedIn: false, hasPass: false, passDays: 0 };
     let map = null, markers = [], mapMode = 'cat';
     let curLang = 'KR';
+    let stayCenter = null;      // [추가] 선택한 숙소 좌표
+    let selectedStay = null;    // [추가] 선택한 숙소 객체
+    let stayCircle = null;      // [추가] 2km 원(표시용)
+
 
     /* --- I18N DATA --- */
     const i18n = {
@@ -749,6 +753,12 @@
     }
 
     function updateHomeUI() {
+      // ✅ [추가] 로그인 상태에만 로그아웃 버튼 보이기
+const loBtn = document.getElementById('logoutBtn');
+if(loBtn){
+  loBtn.style.display = user.loggedIn ? 'block' : 'none';
+}
+
       const t = document.getElementById('homeTitle');
       const l = document.getElementById('homeLabel');
       const txt = i18n[curLang];
@@ -891,6 +901,19 @@
     function downloadReceipt() { if(!user.loggedIn || !user.hasPass) return alert("패스 구매 후 이용 가능"); alert("다운로드 시작"); }
     function promptEmail() { if(!user.loggedIn || !user.hasPass) return alert("패스 구매 후 이용 가능"); prompt("이메일 주소 입력:"); }
 
+    // ✅ [추가] 두 좌표 사이 거리(km)
+    function distKm(lat1, lng1, lat2, lng2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLng = (lng2 - lng1) * Math.PI / 180;
+      const a =
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLng/2) * Math.sin(dLng/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+
     /* --- MAP --- */
     function initMap() {
       if(map) { map.invalidateSize(); return; }
@@ -901,6 +924,14 @@
 
     function setMapMode(mode) {
       mapMode = mode;
+      // ✅ [추가] stay 모드로 다시 들어가면 숙소 선택 초기화
+  if(mode === 'stay'){
+    stayCenter = null;
+    selectedStay = null;
+    if(stayCircle){ map.removeLayer(stayCircle); stayCircle = null; }
+    const btn = document.getElementById('btnResetStay');
+    if(btn) btn.style.display = 'none';
+  }
       document.getElementById('mode-cat').classList.toggle('active', mode==='cat');
       document.getElementById('mode-stay').classList.toggle('active', mode==='stay');
       document.getElementById('mapFilters').style.display = mode==='cat' ? 'flex' : 'none';
@@ -919,12 +950,26 @@
       
       let targets = partners;
       if(mapMode === 'stay') {
-        targets = partners.filter(p => p.cat === 'stay');
-      } else {
-        const activeChip = document.querySelector('.cat-chip.active');
-        const activeCat = activeChip ? activeChip.dataset.cat : 'all';
-        if(activeCat !== 'all') targets = partners.filter(p => p.cat === activeCat);
-      }
+  // 숙소 선택 전: 숙소만 표시
+  if(!stayCenter){
+    targets = partners.filter(p => p.cat === 'stay');
+  } 
+  // 숙소 선택 후: 해당 숙소 + 반경 2km 제휴처(숙소 제외) 표시
+  else {
+    targets = partners.filter(p =>
+      p.partner &&
+      p.cat !== 'stay' &&
+      distKm(stayCenter.lat, stayCenter.lng, p.lat, p.lng) <= 2
+    );
+    // 선택한 숙소도 같이 보이게 맨 앞에
+    if(selectedStay) targets.unshift(selectedStay);
+  }
+} else {
+  const activeChip = document.querySelector('.cat-chip.active');
+  const activeCat = activeChip ? activeChip.dataset.cat : 'all';
+  if(activeCat !== 'all') targets = partners.filter(p => p.cat === activeCat);
+}
+
 
       targets.forEach(p => {
         const typeClass = p.cat + (p.partner ? '' : ' non-partner');
@@ -942,16 +987,42 @@
         m.__pid = p.id; /* [수정] 검색용 id 연결 */
 
         if(mapMode === 'stay') {
-          m.on('click', () => {
-             document.querySelectorAll('.pin').forEach(el => el.classList.add('dimmed'));
-             const currentPin = m.getElement().querySelector('.pin');
-             if(currentPin) currentPin.classList.remove('dimmed');
-             alert(p.name + " 반경 2km 제휴처를 탐색합니다.");
-             feather.replace();
-          });
-        } else {
-           m.bindPopup(`<b>${p.name}</b><br>${p.partner?'제휴':'비제휴'}`);
-        }
+  m.on('click', () => {
+
+    // ✅ 1) 숙소를 클릭한 경우: "반경 2km 제휴처 탐색" + 근처 제휴처 마커 표시
+    if(p.cat === 'stay'){
+      selectedStay = p;
+      stayCenter = { lat: p.lat, lng: p.lng };
+
+      // 2km 원 표시
+      if(stayCircle) map.removeLayer(stayCircle);
+      stayCircle = L.circle([p.lat, p.lng], { radius: 2000 }).addTo(map);
+
+      alert(`${p.name} 주변 2km 내 제휴처를 표시합니다.`);
+      map.setView([p.lat, p.lng], 15);
+      renderMarkers(); // ★ 진짜로 근처 제휴처 찍기
+      return;
+    }
+
+    // ✅ 2) 제휴처를 클릭한 경우: 항목에 맞는 문구 (카테고리별)
+    const catLabel = {
+      food: "음식점",
+      cafe: "카페",
+      gym: "헬스장",
+      work: "워크스페이스"
+    }[p.cat] || "제휴처";
+
+    // 화면 핀 강조(선택 효과)
+    document.querySelectorAll('.pin').forEach(el => el.classList.add('dimmed'));
+    const currentPin = m.getElement()?.querySelector('.pin');
+    if(currentPin) currentPin.classList.remove('dimmed');
+
+    alert(`${catLabel} 제휴처: ${p.name}\n패스 제시 후 혜택을 받으세요.`);
+    feather.replace();
+  });
+} else {
+  m.bindPopup(`<b>${p.name}</b><br>${p.partner?'제휴':'비제휴'}`);
+}
         markers.push(m);
       });
       feather.replace();
